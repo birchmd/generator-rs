@@ -46,6 +46,7 @@ pub struct Generator<I, Y, R> {
     yield_channel: UnboundedReceiver<Y>,
     resume_channel: UnboundedSender<I>,
     return_chanel: UnboundedReceiver<R>,
+    local: task::LocalSet,
 }
 
 impl<I, Y, R> Generator<I, Y, R>
@@ -65,6 +66,7 @@ where
             yield_channel: yield_receiver,
             resume_channel: resume_sender,
             return_chanel: return_receiver,
+            local: task::LocalSet::new(),
         };
         (generator, helper)
     }
@@ -79,10 +81,17 @@ where
     ) -> GeneratorResult<Y, R>
     where
         G: FnOnce(GeneratorHelper<I, Y, R>) -> F,
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + 'static,
     {
-        let continuation = task::spawn((logic)(helper));
-        self.await_yield_or_return(continuation).await
+        let yield_channel = &mut self.yield_channel;
+        let return_channel = &mut self.return_chanel;
+        let local = &mut self.local;
+        local
+            .run_until(async move {
+                let continuation = task::spawn_local((logic)(helper));
+                Self::await_yield_or_return(yield_channel, return_channel, continuation).await
+            })
+            .await
     }
 
     /// Resume the generator using the given continuation (obtained from a prior yield result),
@@ -93,20 +102,26 @@ where
         input: I,
     ) -> GeneratorResult<Y, R> {
         self.resume_channel.send(input).unwrap();
-        self.await_yield_or_return(continuation).await
+        let yield_channel = &mut self.yield_channel;
+        let return_channel = &mut self.return_chanel;
+        let local = &mut self.local;
+        local
+            .run_until(async move {
+                Self::await_yield_or_return(yield_channel, return_channel, continuation).await
+            })
+            .await
     }
 
     async fn await_yield_or_return(
-        &mut self,
+        yield_channel: &mut UnboundedReceiver<Y>,
+        return_channel: &mut UnboundedReceiver<R>,
         continuation: JoinHandle<()>,
     ) -> GeneratorResult<Y, R> {
-        let yield_channel = &mut self.yield_channel;
-        let return_chanel = &mut self.return_chanel;
         tokio::select! {
             biased;
             // Return channel needs to be polled first because the yield channel
             // will be dropped when the future completes.
-            r = return_chanel.recv() => {
+            r = return_channel.recv() => {
                 // Something on the return channel should mean the future is complete
                 continuation.await.unwrap();
                 GeneratorResult::Returned(r.unwrap())
@@ -140,7 +155,7 @@ impl SyncGenerator {
     pub fn start<I, Y, R, G, F>(&self, logic: G) -> (Generator<I, Y, R>, GeneratorResult<Y, R>)
     where
         G: FnOnce(GeneratorHelper<I, Y, R>) -> F,
-        F: Future<Output = ()> + Send + 'static,
+        F: Future<Output = ()> + 'static,
         I: Debug,
         Y: Debug,
         R: Debug,

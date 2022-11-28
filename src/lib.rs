@@ -9,6 +9,8 @@ use tokio::runtime::{self, Runtime};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::{self, JoinHandle};
 
+pub type Continuation = JoinHandle<()>;
+
 /// Describes the result of executing a generator.
 /// The computation can yield with an intermediate value and
 /// a handle for continuing the computation;
@@ -16,7 +18,7 @@ use tokio::task::{self, JoinHandle};
 pub enum GeneratorResult<Y, R> {
     Yielded {
         value: Y,
-        continuation: JoinHandle<()>,
+        continuation: Continuation,
     },
     Returned(R),
 }
@@ -96,11 +98,7 @@ where
 
     /// Resume the generator using the given continuation (obtained from a prior yield result),
     /// and the given input.
-    pub async fn resume(
-        &mut self,
-        continuation: JoinHandle<()>,
-        input: I,
-    ) -> GeneratorResult<Y, R> {
+    pub async fn resume(&mut self, continuation: Continuation, input: I) -> GeneratorResult<Y, R> {
         self.resume_channel.send(input).unwrap();
         let yield_channel = &mut self.yield_channel;
         let return_channel = &mut self.return_chanel;
@@ -115,7 +113,7 @@ where
     async fn await_yield_or_return(
         yield_channel: &mut UnboundedReceiver<Y>,
         return_channel: &mut UnboundedReceiver<R>,
-        continuation: JoinHandle<()>,
+        continuation: Continuation,
     ) -> GeneratorResult<Y, R> {
         tokio::select! {
             biased;
@@ -170,7 +168,7 @@ impl SyncGenerator {
     pub fn resume<I, Y, R>(
         &self,
         generator: &mut Generator<I, Y, R>,
-        continuation: JoinHandle<()>,
+        continuation: Continuation,
         input: I,
     ) -> GeneratorResult<Y, R>
     where
